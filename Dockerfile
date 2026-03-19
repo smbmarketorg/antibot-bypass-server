@@ -27,14 +27,10 @@ RUN pdm install --no-lock --no-editable
 RUN /opt/venv/bin/pip install playwright
 RUN /opt/venv/bin/python -m playwright install-deps
 
-# Copy pre-downloaded Camoufox cache to avoid 707MB download on first request
-# Make this optional - if camoufox_cache doesn't exist, create empty directory
-COPY camoufox_cache* /tmp/camoufox_cache_temp/
-RUN mkdir -p /home/pwuser/.cache/camoufox/ && \
-    if [ -d "/tmp/camoufox_cache_temp/camoufox_cache" ]; then \
-        cp -r /tmp/camoufox_cache_temp/camoufox_cache/* /home/pwuser/.cache/camoufox/; \
-    fi && \
-    rm -rf /tmp/camoufox_cache_temp
+# Install Camoufox browser binary during build (avoids 707MB download on first request)
+# XDG_CACHE_HOME=/app/cache matches docker-compose env, so camoufox installs to /app/cache/camoufox
+ENV XDG_CACHE_HOME="/app/cache"
+RUN pdm run python -m camoufox fetch
 
 # Copy application code
 COPY app/ ./app/
