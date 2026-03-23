@@ -11,7 +11,7 @@ from app.services.base import BaseScraper
 
 logger = logging.getLogger(__name__)
 
-BROWSER_SEMAPHORE = asyncio.Semaphore(5)
+BROWSER_SEMAPHORE = asyncio.Semaphore(2)
 
 # Akamai response size thresholds (based on observed data from LoopNet)
 # ~230-507 chars = instant 403 "Access Denied" block (IP flagged)

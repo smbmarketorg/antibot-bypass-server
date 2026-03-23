@@ -29,6 +29,11 @@ services:
     cap_add:
       - SYS_ADMIN
     shm_size: 2gb
+    deploy:
+      resources:
+        limits:
+          cpus: '0.8'
+          memory: 2G
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
