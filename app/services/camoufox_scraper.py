@@ -5,13 +5,22 @@ import re
 import time
 from camoufox.async_api import AsyncCamoufox
 from playwright.async_api import Browser, Page, ViewportSize
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, Union
 from app.models import ScraperType, ScrapeResponse
 from app.services.base import BaseScraper
 
 logger = logging.getLogger(__name__)
 
 BROWSER_SEMAPHORE = asyncio.Semaphore(2)
+
+# Use Xvfb virtual display instead of Firefox's built-in headless mode.
+# This gives Firefox a display context with software-rendered WebGL via Mesa/llvmpipe.
+# Without this, WebGL returns NO_CONTEXT on GPU-less servers, which Akamai detects as a bot.
+HEADLESS_MODE: Union[bool, str] = "virtual"
+
+# Regex to detect country-specific Webshare proxy usernames (e.g. yjlmojnd-us-12345)
+_US_PROXY_RE = re.compile(r"^(.+)-us-\d+$")
+_US_PROXY_MAX = 40000
 
 # Akamai response size thresholds (based on observed data from LoopNet)
 # ~230-507 chars = instant 403 "Access Denied" block (IP flagged)
@@ -46,6 +55,18 @@ class CamoufoxScraper(BaseScraper):
     async def cleanup(self) -> None:
         logger.info("Camoufox Scraper cleaned up")
 
+    @staticmethod
+    def _rotate_us_proxy_username(username: Optional[str]) -> Optional[str]:
+        """If username is a US-specific Webshare proxy (e.g. yjlmojnd-us-123),
+        return a new random US endpoint. Otherwise return as-is."""
+        if not username:
+            return username
+        match = _US_PROXY_RE.match(username)
+        if match:
+            base = match.group(1)
+            return f"{base}-us-{random.randint(1, _US_PROXY_MAX)}"
+        return username
+
     async def scrape(
         self,
         url: str,
@@ -63,7 +84,8 @@ class CamoufoxScraper(BaseScraper):
         Scrape a URL with Camoufox, cycling through proxy IPs on Akamai blocks.
 
         Strategy:
-        - Each attempt launches a new browser (= new proxy IP via -rotate)
+        - Each attempt launches a new browser with a fresh proxy IP
+        - For US-specific proxies (-us-N), a new random endpoint is picked each attempt
         - Blocked IPs (~500 char response) are detected in ~3-5s and skipped immediately
         - JS challenges (~2500 chars) get up to 15s to resolve
         - Successful pages get full networkidle + human simulation treatment
@@ -72,11 +94,13 @@ class CamoufoxScraper(BaseScraper):
         max_ip_attempts = 10
 
         for attempt in range(max_ip_attempts):
+            # Rotate US proxy username on each attempt so we get a different IP
+            attempt_proxy_username = self._rotate_us_proxy_username(proxy_username)
             try:
                 async with BROWSER_SEMAPHORE:
                     content, response_cookies, block_type = await self._scrape_with_camoufox(
-                        url, selector_to_wait_for, timeout, headless,
-                        proxy_url, proxy_username, proxy_password, proxy_server, cookies,
+                        url, selector_to_wait_for, timeout, HEADLESS_MODE,
+                        proxy_url, attempt_proxy_username, proxy_password, proxy_server, cookies,
                     )
 
                 content_length = len(content) if content else 0
@@ -142,7 +166,7 @@ class CamoufoxScraper(BaseScraper):
         url: str,
         selector_to_wait_for: Optional[str] = None,
         timeout: int = 30000,
-        headless: bool = True,
+        headless: Union[bool, str] = True,
         proxy_url: Optional[str] = None,
         proxy_username: Optional[str] = None,
         proxy_password: Optional[str] = None,
