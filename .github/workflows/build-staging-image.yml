@@ -1,0 +1,44 @@
+name: build-staging-image
+
+# Builds the anti-bot-bypass-server image and pushes it to ECR as :staging (+ git SHA).
+# Auth is via GitHub OIDC -> the Terraform-created CI role (no static AWS keys).
+
+on:
+  push:
+    branches: [staging]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  # From `terraform output github_ci_role_arn`:
+  AWS_ROLE_ARN: arn:aws:iam::383158158230:role/smbmarket-scraper-staging-ci-push
+  ECR_REPO: smbmarket/antibot-bypass-server
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          IMAGE="$REGISTRY/$ECR_REPO"
+          docker build -t "$IMAGE:staging" -t "$IMAGE:${GITHUB_SHA}" .
+          docker push "$IMAGE:staging"
+          docker push "$IMAGE:${GITHUB_SHA}"
