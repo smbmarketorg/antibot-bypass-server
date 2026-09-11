@@ -5,11 +5,16 @@ FROM mcr.microsoft.com/playwright:v1.55.0-noble
 WORKDIR /app
 
 # Install Python and pip (use system Python)
+# xvfb is REQUIRED: camoufox_scraper sets headless="virtual", which starts a
+# virtual X display. Without the binary Camoufox dies on startup (EPIPE) and
+# Docker restarts the container — observed 682 restarts, leaving BrightData as
+# the only browser backend and draining its rate-limit bucket.
 RUN apt-get update && apt-get install -y \
     python3 \
     python3-pip \
     python3-venv \
     curl \
+    xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 # Create virtual environment

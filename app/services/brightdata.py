@@ -10,7 +10,16 @@ from app.services.base import BaseScraper
 
 logger = logging.getLogger(__name__)
 
-BRIGHTDATA_SEMAPHORE = asyncio.Semaphore(50)
+# Concurrency is the single biggest lever on BrightData's adaptive rate
+# limit: every entry here opens a browser session, and the account-wide bucket
+# is on session opens. 50 kept it permanently drained (see config comment).
+BRIGHTDATA_SEMAPHORE = asyncio.Semaphore(settings.BRIGHTDATA_MAX_CONCURRENCY)
+
+
+def _is_rate_limited(exc: Exception) -> bool:
+    """BrightData signals its adaptive limit in the CDP protocol error text."""
+    msg = str(exc).lower()
+    return "bucket_rate_limit" in msg or "rate limit" in msg
 
 class BrightDataCDPScraper(BaseScraper):
     def __init__(self) -> None:
@@ -58,14 +67,41 @@ class BrightDataCDPScraper(BaseScraper):
                 execution_time = time.time() - start_time
                 content_length = len(content) if content else 0
 
-                # Validate content quality
-                if content_length < 10000:
+                # Validate content quality. Anything at deny-page size is a
+                # block, not content — previously the LAST attempt fell through
+                # and returned it as success=True, so the scraper stored Akamai
+                # "Access Denied" pages as valid results and the outage stayed
+                # invisible for days.
+                if content_length < settings.BRIGHTDATA_MIN_VALID_BYTES:
                     logger.warning(
-                        f"Content too short ({content_length} chars) for {url}"
+                        "Blocked/deny-page response (%d bytes, %d cookies) for %s",
+                        content_length, len(cookies or {}), url,
                     )
                     if attempt < max_retries:
                         retries += 1
-                        await asyncio.sleep(2**attempt)  # Exponential backoff
+                        await asyncio.sleep(2**attempt)
+                        continue
+                    return ScrapeResponse(
+                        success=False,
+                        error=(
+                            f"blocked: {content_length} bytes returned "
+                            f"(< {settings.BRIGHTDATA_MIN_VALID_BYTES} threshold)"
+                        ),
+                        html=content,
+                        cookies=cookies,
+                        content_length=content_length,
+                        execution_time=time.time() - start_time,
+                        scraper_used=self.name,
+                        retries_attempted=retries,
+                    )
+
+                if content_length < 10000:
+                    logger.warning(
+                        f"Content short ({content_length} chars) for {url}"
+                    )
+                    if attempt < max_retries:
+                        retries += 1
+                        await asyncio.sleep(2**attempt)
                         continue
 
                 return ScrapeResponse(
@@ -85,7 +121,17 @@ class BrightDataCDPScraper(BaseScraper):
                 retries += 1
 
                 if attempt < max_retries:
-                    await asyncio.sleep(2**attempt)
+                    if _is_rate_limited(e):
+                        # Retrying a drained bucket after 1-2s just re-drains
+                        # it. Measured: ~90s of quiet restored full service.
+                        delay = settings.BRIGHTDATA_RATE_LIMIT_BACKOFF_S * (attempt + 1)
+                        logger.warning(
+                            "BrightData rate limit hit for %s — backing off %.0fs",
+                            url, delay,
+                        )
+                    else:
+                        delay = 2**attempt
+                    await asyncio.sleep(delay)
                     continue
                 else:
                     execution_time = time.time() - start_time
