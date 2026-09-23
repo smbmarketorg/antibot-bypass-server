@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y \
     python3-pip \
     python3-venv \
     curl \
+    xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 # Create virtual environment
@@ -34,6 +35,8 @@ RUN pdm run python -m camoufox fetch
 
 # Copy application code
 COPY app/ ./app/
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 # Copy seccomp profile for security
 COPY seccomp_profile.json ./
@@ -44,6 +47,9 @@ RUN chmod -R 777 /app/cache/camoufox /app/logs
 
 # Stay as root - no USER directive
 
+# One shared virtual screen. Camoufox uses this instead of starting Xvfb per request.
+ENV DISPLAY=:99
+
 # Expose port
 EXPOSE 8000
 
@@ -51,5 +57,6 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Run the application as root
+# Run the application as root. Entrypoint starts Xvfb, then the API.
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["pdm", "run", "python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

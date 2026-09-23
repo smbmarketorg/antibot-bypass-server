@@ -13,10 +13,12 @@ logger = logging.getLogger(__name__)
 
 BROWSER_SEMAPHORE = asyncio.Semaphore(2)
 
-# Use Xvfb virtual display instead of Firefox's built-in headless mode.
-# This gives Firefox a display context with software-rendered WebGL via Mesa/llvmpipe.
-# Without this, WebGL returns NO_CONTEXT on GPU-less servers, which Akamai detects as a bot.
-HEADLESS_MODE: Union[bool, str] = "virtual"
+# Firefox needs a real display so WebGL works. Built-in headless mode returns
+# NO_CONTEXT on a GPU-less server, which Akamai treats as a bot.
+# docker-entrypoint.sh starts one Xvfb on DISPLAY=:99 for the life of the container.
+# Keep this False. "virtual" starts a new Xvfb per request; those processes exit
+# and Firefox then fails with "cannot open display".
+HEADLESS_MODE: Union[bool, str] = False
 
 # Regex to detect country-specific Webshare proxy usernames (e.g. yjlmojnd-us-12345)
 _US_PROXY_RE = re.compile(r"^(.+)-us-\d+$")
