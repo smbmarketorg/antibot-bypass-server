@@ -37,6 +37,37 @@ class ScrapeResponse(BaseModel):
     cookies: Optional[Dict[str, str]] = None  
 
 
+class CookiesRequest(BaseModel):
+    """Earn a site's anti-bot cookies in a real browser through a proxy exit.
+
+    The response names the exit that earned them, so the caller can send its
+    own requests through the SAME exit. Akamai ties cookies to the visitor, and
+    on api.bizbuysell.com a cookie set is good for one protected API call.
+    """
+    url: HttpUrl
+    # Cookie that must be present for the attempt to count (e.g. "_track_tkn").
+    required_cookie: Optional[str] = None
+    proxy_server: Optional[str] = None
+    proxy_username: Optional[str] = None
+    proxy_password: Optional[str] = None
+    # Pick a random US exit (-us-N) per attempt. False = use proxy_username as-is.
+    rotate_us_proxy: bool = True
+    max_attempts: int = 4
+    # Per attempt: page load plus the wait for required_cookie.
+    timeout_ms: int = 45000
+
+
+class CookiesResponse(BaseModel):
+    success: bool
+    cookies: Optional[Dict[str, str]] = None
+    # The proxy username (exit) the cookies were earned through.
+    proxy_username: Optional[str] = None
+    user_agent: Optional[str] = None
+    attempts: int = 0
+    execution_time: float = 0.0
+    error: Optional[str] = None
+
+
 class HealthResponse(BaseModel):
     status: str
     version: str = AppData.app_version

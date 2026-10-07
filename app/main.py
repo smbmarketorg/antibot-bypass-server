@@ -2,7 +2,7 @@ from fastapi import Depends, FastAPI, HTTPException  # type: ignore[import-not-f
 from contextlib import asynccontextmanager
 import logging
 from app.auth import verify_api_key
-from app.models import ScrapeRequest, ScrapeResponse, HealthResponse
+from app.models import CookiesRequest, CookiesResponse, ScrapeRequest, ScrapeResponse, HealthResponse, ScraperType
 from app.services.factory import ScraperFactory
 from app.config import settings
 
@@ -64,6 +64,26 @@ async def scrape_url(request: ScrapeRequest, api_key: str = Depends(verify_api_k
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/cookies", response_model=CookiesResponse)
+async def get_cookies(request: CookiesRequest, api_key: str = Depends(verify_api_key)):
+    """Earn cookies in Camoufox through one proxy exit and say which exit it was."""
+    try:
+        scraper = ScraperFactory.get_scraper(ScraperType.CAMOUFOX)
+        return await scraper.get_cookies(
+            url=str(request.url),
+            required_cookie=request.required_cookie,
+            proxy_server=request.proxy_server or None,
+            proxy_username=request.proxy_username or None,
+            proxy_password=request.proxy_password or None,
+            rotate_us_proxy=request.rotate_us_proxy,
+            max_attempts=max(1, min(request.max_attempts, 10)),
+            timeout_ms=request.timeout_ms,
+        )
+    except Exception as e:
+        logger.error(f"/cookies failed: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
