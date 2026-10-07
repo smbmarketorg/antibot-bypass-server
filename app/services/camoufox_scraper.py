@@ -6,7 +6,7 @@ import time
 from camoufox.async_api import AsyncCamoufox
 from playwright.async_api import Browser, Page, ViewportSize
 from typing import Optional, Tuple, Dict, Union
-from app.models import ScraperType, ScrapeResponse
+from app.models import CookiesResponse, ScraperType, ScrapeResponse
 from app.services.base import BaseScraper
 
 logger = logging.getLogger(__name__)
@@ -68,6 +68,84 @@ class CamoufoxScraper(BaseScraper):
             base = match.group(1)
             return f"{base}-us-{random.randint(1, _US_PROXY_MAX)}"
         return username
+
+    async def get_cookies(
+        self,
+        url: str,
+        required_cookie: Optional[str] = None,
+        proxy_server: Optional[str] = None,
+        proxy_username: Optional[str] = None,
+        proxy_password: Optional[str] = None,
+        rotate_us_proxy: bool = True,
+        max_attempts: int = 4,
+        timeout_ms: int = 45000,
+    ) -> CookiesResponse:
+        """Load ``url`` in a fresh Camoufox through one proxy exit and return its cookies.
+
+        Lighter than scrape(): domcontentloaded plus a poll for
+        ``required_cookie``, no networkidle or human simulation (~7s for
+        bizbuysell.com on 2026-10-07). Returns the exit used so the caller can
+        reuse it.
+        """
+        start = time.time()
+        last_error = None
+        for attempt in range(1, max_attempts + 1):
+            username = (
+                self._rotate_us_proxy_username(proxy_username)
+                if rotate_us_proxy else proxy_username
+            )
+            proxy = None
+            if proxy_server and username and proxy_password:
+                proxy = {"server": proxy_server, "username": username, "password": proxy_password}
+            try:
+                async with BROWSER_SEMAPHORE:
+                    async with AsyncCamoufox(
+                        headless=HEADLESS_MODE, proxy=proxy, geoip=bool(proxy),
+                    ) as browser:
+                        page: Page = await browser.new_page()
+                        await page.route(
+                            "**/*",
+                            lambda route: route.abort()
+                            if route.request.resource_type in ["image", "media", "font"]
+                            else route.continue_(),
+                        )
+                        deadline = time.time() + timeout_ms / 1000
+                        await page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
+                        cookies: Dict[str, str] = {}
+                        while True:
+                            cookies = await self._get_cookies(page)
+                            if not required_cookie or cookies.get(required_cookie):
+                                break
+                            if time.time() >= deadline:
+                                break
+                            await page.wait_for_timeout(1000)
+                        if required_cookie and not cookies.get(required_cookie):
+                            last_error = f"{required_cookie} not set within {timeout_ms}ms"
+                            logger.warning(f"[COOKIES] attempt {attempt}/{max_attempts} {url}: {last_error}")
+                            continue
+                        user_agent = await page.evaluate("navigator.userAgent")
+                        elapsed = time.time() - start
+                        logger.info(
+                            f"[COOKIES] {url} ok on attempt {attempt}/{max_attempts} "
+                            f"({len(cookies)} cookies, {elapsed:.1f}s)"
+                        )
+                        return CookiesResponse(
+                            success=True,
+                            cookies=cookies,
+                            proxy_username=username,
+                            user_agent=user_agent,
+                            attempts=attempt,
+                            execution_time=elapsed,
+                        )
+            except Exception as e:
+                last_error = str(e)
+                logger.warning(f"[COOKIES] attempt {attempt}/{max_attempts} {url} failed: {e}")
+        return CookiesResponse(
+            success=False,
+            attempts=max_attempts,
+            execution_time=time.time() - start,
+            error=last_error or "no attempt succeeded",
+        )
 
     async def scrape(
         self,
