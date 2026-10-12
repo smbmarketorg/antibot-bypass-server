@@ -1,5 +1,7 @@
 import asyncio
+import contextlib
 import logging
+import os
 import random
 import re
 import time
@@ -12,6 +14,31 @@ from app.services.base import BaseScraper
 logger = logging.getLogger(__name__)
 
 BROWSER_SEMAPHORE = asyncio.Semaphore(2)
+# /cookies gets its own browsers. Sharing BROWSER_SEMAPHORE with /scrape let a
+# busy page-scrape run (BusinessBroker, ~10 pages/min) queue BizBuySell cookie
+# requests for up to 10 HOURS on 2026-10-11/12: every hourly BBS check and the
+# daily price check failed while the cookie fetch itself takes ~7s.
+COOKIES_SEMAPHORE = asyncio.Semaphore(int(os.getenv("COOKIES_BROWSERS", "2")))
+# A request that cannot get a browser within this long fails fast instead of
+# being served long after its caller gave up (which only grows the queue).
+COOKIES_MAX_QUEUE_WAIT_S = float(os.getenv("COOKIES_MAX_QUEUE_WAIT_S", "90"))
+SCRAPE_MAX_QUEUE_WAIT_S = float(os.getenv("SCRAPE_MAX_QUEUE_WAIT_S", "300"))
+
+
+class BrowserBusy(Exception):
+    """No browser slot became free within the request's queue budget."""
+
+
+@contextlib.asynccontextmanager
+async def browser_slot(semaphore: asyncio.Semaphore, max_wait_s: float):
+    try:
+        await asyncio.wait_for(semaphore.acquire(), timeout=max(0.1, max_wait_s))
+    except asyncio.TimeoutError:
+        raise BrowserBusy(f"no browser free within {max_wait_s:.0f}s")
+    try:
+        yield
+    finally:
+        semaphore.release()
 
 # Firefox needs a real display so WebGL works. Built-in headless mode returns
 # NO_CONTEXT on a GPU-less server, which Akamai treats as a bot.
@@ -98,7 +125,7 @@ class CamoufoxScraper(BaseScraper):
             if proxy_server and username and proxy_password:
                 proxy = {"server": proxy_server, "username": username, "password": proxy_password}
             try:
-                async with BROWSER_SEMAPHORE:
+                async with browser_slot(COOKIES_SEMAPHORE, COOKIES_MAX_QUEUE_WAIT_S - (time.time() - start)):
                     async with AsyncCamoufox(
                         headless=HEADLESS_MODE, proxy=proxy, geoip=bool(proxy),
                     ) as browser:
@@ -137,6 +164,10 @@ class CamoufoxScraper(BaseScraper):
                             attempts=attempt,
                             execution_time=elapsed,
                         )
+            except BrowserBusy as e:
+                last_error = f"busy: {e}"
+                logger.warning(f"[COOKIES] {url} gave up waiting for a browser: {e}")
+                break
             except Exception as e:
                 last_error = str(e)
                 logger.warning(f"[COOKIES] attempt {attempt}/{max_attempts} {url} failed: {e}")
@@ -177,7 +208,7 @@ class CamoufoxScraper(BaseScraper):
             # Rotate US proxy username on each attempt so we get a different IP
             attempt_proxy_username = self._rotate_us_proxy_username(proxy_username)
             try:
-                async with BROWSER_SEMAPHORE:
+                async with browser_slot(BROWSER_SEMAPHORE, SCRAPE_MAX_QUEUE_WAIT_S - (time.time() - start_time)):
                     content, response_cookies, block_type = await self._scrape_with_camoufox(
                         url, selector_to_wait_for, timeout, HEADLESS_MODE,
                         proxy_url, attempt_proxy_username, proxy_password, proxy_server, cookies,
@@ -225,6 +256,16 @@ class CamoufoxScraper(BaseScraper):
                         logger.warning(f"[DEBUG HTML PREVIEW] {content[:2000]}")
                     continue
 
+            except BrowserBusy as e:
+                execution_time = time.time() - start_time
+                logger.warning(f"[BUSY] {url}: {e} — not queued any longer")
+                return ScrapeResponse(
+                    success=False,
+                    error=f"busy: {e}",
+                    execution_time=execution_time,
+                    scraper_used=self.name,
+                    retries_attempted=attempt,
+                )
             except Exception as e:
                 logger.error(
                     f"[ERROR] Attempt {attempt + 1}/{max_ip_attempts} for {url}: {e}"
